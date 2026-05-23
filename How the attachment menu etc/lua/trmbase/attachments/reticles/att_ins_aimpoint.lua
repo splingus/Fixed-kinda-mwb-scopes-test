@@ -1,0 +1,21 @@
+ATTACHMENT.Name = "Aimpoint"
+ATTACHMENT.Category = "att_sight"
+ATTACHMENT.Base = "att_reticle"
+ATTACHMENT.Selectable = true
+
+ATTACHMENT.Angles  = Angle(-90,0,90)
+
+ATTACHMENT.Sight = {
+    Pos = Vector(0.00,0, -0.95 ) ,
+    Align = "reticle" ,
+    Material = Material("models/weapons/tfa_ins2/optics/aimpoint_reticule") ,
+    Size = 64 , 
+    Color = Color(255,255,255),
+    HideMaterial = {2} , --Material Index
+}
+
+ATTACHMENT.Model = Model("models/weapons/tfa_ins2/upgrades/a_optic_aimpoint.mdl")
+
+function ATTACHMENT:ChangeWeaponStats(weapon)
+    weapon.Aim.Time = weapon.Aim.Time * 1.05
+end
