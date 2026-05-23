@@ -1,0 +1,779 @@
+TRM SCOPE FIX - IN DEPTH HANDOFF
+================================
+
+This document explains what was changed, where each change goes, what it replaced, and how the scope went from the original broken version to the current PIP-style version.
+
+
+ENGLISH
+=======
+
+1. Starting point: what was broken in the original scope
+-------------------------------------------------------
+
+Original issue:
+The original TRM + INS2/TFA scope setup was not behaving like a real magnified PIP optic. It was mostly acting like a normal attachment model with some ADS zoom, and the scope visuals were not isolated from the weapon model.
+
+Main symptoms:
+- The scope view was not properly magnified.
+- The reticle was missing or barely visible.
+- INS2/TFA reticle materials could appear as square boxes.
+- The scope view could appear sideways or misaligned.
+- The physical Elcan model, lens, or white square glass could render inside the scope overlay.
+- The scope had a rectangular bright area instead of a clean circular lens.
+- Earlier attempts could show black circles, cached render junk, or double scope images.
+
+Root cause:
+TRM was not built with an ARC9-style RT scope pipeline. ARC9 scopes have a deep system for render targets, model submaterials, scope angle correction, reticle drawing, and viewmodel render timing. TRM's attachment system is simpler, so trying to directly force INS2/TFA scopes into it caused model, material, and render-order conflicts.
+
+
+2. First major change: added a render target scope view
+------------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+RenderScopeView(att, wep)
+
+What was added:
+A render target camera was added. The scope now renders a separate magnified player view into a texture.
+
+What it replaced:
+This replaced relying only on the normal ADS camera zoom or the physical optic model lens. The lens now has its own rendered view.
+
+How it works:
+- GetScopeRT creates a square render target.
+- RenderScopeView renders from owner:EyePos() and owner:EyeAngles().
+- render.PushRenderTarget(rt) starts rendering into the scope texture.
+- render.RenderView draws the zoomed world into that texture.
+- render.PopRenderTarget() returns rendering to normal.
+
+Important final code behavior:
+- RT size is controlled by Scope.RTSize.
+- The current Elcan uses RTSize = 1024.
+- The render viewport is forced square with:
+  x = 0
+  y = 0
+  w = rtSize
+  h = rtSize
+  aspect = 1
+
+Why that matters:
+Without forcing a square viewport, the render target can stretch, crop, or look wrong depending on player resolution.
+
+
+3. Second change: square RT was clipped into a circle
+----------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+DrawTexturedCircle(x, y, radius, segments, textureRotate)
+
+What was added:
+A polygon-based circular texture drawing function.
+
+What it replaced:
+It replaced drawing the scope RT with surface.DrawTexturedRect or DrawTexturedRectRotated.
+
+Why this was needed:
+Render targets are square textures. If you draw them normally, the player sees a square scope image. The screenshots showed this exact problem: a circular scope line with a big rectangular image behind it.
+
+How it works:
+The function builds a fan of vertices around a center point. Each vertex gets UV coordinates so the square texture maps into a round shape.
+
+How to tune:
+- Increase segments for smoother circles.
+- Lower segments for performance.
+- textureRotate can rotate the RT image if absolutely needed, but the current Elcan uses TextureRotate = 0.
+
+
+4. Third change: fallback reticle lines were added
+-------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+DrawReticle2D(att, scope, x, y, radius, alpha)
+
+What was added:
+Manual reticle drawing using surface.DrawRect.
+
+What it replaced:
+It replaced relying only on the INS2/TFA Elcan reticle material.
+
+Why this was needed:
+The INS2/TFA reticle material was unreliable in this render path. It could disappear, render as a square, or become unreadable on bright backgrounds.
+
+Current reticle behavior:
+- Fine center crosshair.
+- Thicker left and right posts.
+- Thicker lower post.
+- Reticle color controlled by ReticleLineColor.
+
+How to tune:
+Inside DrawReticle2D:
+- gap changes the center gap.
+- fineLen changes the thin line length.
+- postStart changes how far the thick posts sit from center.
+- postLen changes thick post length.
+- thick changes fine line thickness.
+- postThick changes post thickness.
+
+
+5. Fourth change: material reticles were made optional
+-----------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Behavior:
+The material reticle only draws if:
+UseMaterialReticle = true
+
+Current Elcan setting:
+UseMaterialReticle = false
+
+What it replaced:
+Earlier versions tried to draw the INS2/TFA material reticle automatically.
+
+Why it was changed:
+The material reticle could appear as a square texture box. Disabling it stops the square reticle artifact.
+
+How to change later:
+If someone has a clean transparent reticle material, set UseMaterialReticle = true in the optic's Scope table.
+
+
+6. Fifth change: 3D scope lens rendering was tested, then disabled for Elcan
+---------------------------------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+DrawScope3D(att, wep, scopeAtt)
+
+What was attempted:
+The RT was drawn onto the optic model lens with render.DrawQuadEasy.
+
+What went wrong:
+TRM's model draw order was not built for this. The 3D lens and HUD overlay could stack together, producing:
+- double scope views
+- black circles
+- white squares
+- physical model/lens showing through the overlay
+
+Current Elcan setting:
+Use3D = false
+UseMaterialReticle3D = false
+
+Why it remains in the base:
+It is kept for future optics, but the current Elcan uses the safer HUD/PIP overlay path.
+
+
+7. Sixth change: experimental PreRender hook was tried, then removed
+-------------------------------------------------------------------
+
+Deleted file:
+lua/autorun/client/cl_trm_scope_rt.lua
+
+What it was:
+An ARC9-inspired attempt to render the RT earlier in the frame with a PreRender hook.
+
+Why it was tried:
+ARC9 renders scopes in carefully chosen render hooks, not just inside attachment drawing. I tried to imitate that timing.
+
+Why it was removed:
+In TRM, the hook could capture a bad frame before the weapon/attachment state was ready. That produced black circles, cached junk, and incorrect objects inside the scope RT.
+
+Final decision:
+Do not use the PreRender hook in this patch. The current stable version renders from the optic's render path only.
+
+
+8. Seventh change: noise overlay was removed
+-------------------------------------------
+
+Removed behavior:
+The old scopeNoise material pass was removed from att_optic.lua.
+
+What it used:
+Material("models/weapons/tfa_ins2/optics/laser_noise")
+
+Why it was removed:
+It could show as square dirty texture junk and made debugging harder.
+
+How to add lens dirt later:
+Use a proper transparent circular lens dirt texture or a shader. Do not use a random square optic/noise material.
+
+
+9. Eighth change: physical optic model is hidden while scoped
+------------------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+ATTACHMENT:RenderScope(wep, model)
+
+Current Elcan setting:
+HideModelInScope = true
+
+What it replaced:
+Previously, the code always called model:DrawModel() before drawing the scope overlay.
+
+Why that was bad:
+The Elcan body, glass, and white lens material were visible inside the scope image. This caused screenshots where the scope body sat inside the overlay.
+
+How it works now:
+If the player is aiming and HideModelInScope is true, the physical optic model is skipped while the HUD scope overlay is active.
+
+How to tune:
+- HideModelInScope = true hides the model while scoped.
+- HideModelInScope = false shows the model while scoped.
+
+
+10. Ninth change: overlay was centered on screen
+-----------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Current Elcan setting:
+CenterOverlay = true
+
+What it replaced:
+The overlay originally used scopeAtt.Pos:ToScreen(), meaning the scope lens followed the model attachment point.
+
+Why that was bad:
+The overlay could drift or line up badly with the player's actual aim.
+
+How it works now:
+If CenterOverlay is true, the scope lens is drawn at ScrW() * 0.5 and ScrH() * 0.5.
+
+How to tune:
+- CenterOverlay = true keeps it centered.
+- CenterOverlay = false makes it follow the optic model attachment.
+- ScreenOffset can shift the centered overlay if needed.
+
+
+11. Tenth change: the bright square around the lens was fixed
+------------------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+DrawScopeOverlay(att, wep, screen)
+
+What went wrong before:
+The overlay only darkened the area outside the circle's bounding square. Since a circle fits inside a square, the square corners stayed bright and made a huge rectangle around the circular scope.
+
+Final fix:
+The current code darkens the entire screen first:
+surface.DrawRect(0, 0, ScrW(), ScrH())
+
+Then it draws:
+1. black filled scope housing circles
+2. the circular RT lens
+3. reticle lines
+4. scope rim/highlight rings
+
+Result:
+Only the circular PIP lens should be bright. The square should be gone.
+
+
+12. Eleventh change: visible scope rim/housing was added
+-------------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/base/att_optic.lua
+
+Main function:
+DrawScopeEdge(x, y, radius, alpha)
+
+What was added:
+The overlay now draws black ring outlines and subtle inner highlights.
+
+Why:
+The scope should show an outline like a real optic. Without a rim, it looked like a flat circular HUD cutout.
+
+How to tune:
+- Increase radius + 34 or radius + 17 in DrawScopeOverlay for a thicker housing.
+- Increase the loop range in DrawScopeEdge for thicker outline.
+- Lower alpha values for softer rim.
+
+
+13. Twelfth change: Elcan magnification was retuned
+--------------------------------------------------
+
+Where it goes:
+lua/trmbase/attachments/reticles/att_ins_elcan.lua
+
+Current values:
+Magnification = 4
+FOV = 18
+Aim.Scale = 1.15
+
+What it replaced:
+Earlier test values had weaker magnification or too much normal ADS camera zoom.
+
+Why:
+A PIP scope should get most of its zoom from the render target lens, not from zooming the entire player screen.
+
+How to tune:
+- Lower FOV for stronger magnification.
+- Raise FOV for weaker magnification.
+- Keep Aim.Scale low for PIP scopes.
+
+Examples:
+FOV = 14 means stronger zoom.
+FOV = 24 means weaker zoom.
+Aim.Scale = 1.15 keeps player camera mostly normal.
+Aim.Scale = 1.45 zooms the whole camera more.
+
+
+14. Current Elcan final settings
+--------------------------------
+
+Where it goes:
+lua/trmbase/attachments/reticles/att_ins_elcan.lua
+
+Current Scope table:
+Magnification = 4
+FOV = 18
+RTSize = 1024
+ScreenScale = 0.62
+CenterOverlay = true
+HideModelInScope = true
+ReticleSize = 230
+ReticleLineColor = Color(0, 0, 0, 245)
+Parallax = 0.08
+ParallaxMax = 0.12
+BackdropAlpha = 245
+ScreenOverlay = true
+Use3D = false
+UseMaterialReticle = false
+UseMaterialReticle3D = false
+TextureRotate = 0
+DrawAt = 0.35
+ZNear = 4
+
+What each important value means:
+- Magnification: target optic magnification label/logic.
+- FOV: real scope RT zoom. Lower means stronger zoom.
+- RTSize: scope texture resolution.
+- ScreenScale: on-screen PIP lens size.
+- CenterOverlay: centers the lens on screen.
+- HideModelInScope: hides physical optic model during scoped overlay.
+- ReticleLineColor: fallback reticle color.
+- BackdropAlpha: darkness outside the lens.
+- Use3D: disables the unstable 3D model-lens path for this Elcan.
+- UseMaterialReticle: disables broken square reticle material.
+- TextureRotate: left at 0 unless the RT view truly needs rotation.
+
+
+15. What remains if someone wants to improve it further
+------------------------------------------------------
+
+This patch is a TRM-compatible HUD/PIP scope, not a full ARC9 clone.
+
+To improve it further:
+- Build a real model-submaterial RT system.
+- Apply the RT material directly to the optic lens material.
+- Add proper lens shader/distortion.
+- Add real eye relief/parallax masking.
+- Add a transparent lens dirt texture instead of square noise.
+- Move scope RT rendering into a clean render hook only after TRM's draw order is redesigned.
+
+Why that is bigger:
+ARC9 has a full weapon-base architecture for RT scopes. TRM does not. A true ARC9-level scope requires rewriting more of the weapon/render pipeline, not just changing one attachment file.
+
+
+
+中文
+====
+
+1. 最开始原版瞄准镜坏在哪里
+---------------------------
+
+原始问题：
+TRM + INS2/TFA 的原始瞄准镜并不像真正的 PIP 放大镜。它更像普通配件模型加 ADS 缩放，瞄准镜画面没有和武器模型真正分离。
+
+主要症状：
+- 镜片内部没有正确放大。
+- 准星消失或很难看清。
+- INS2/TFA 准星材质可能显示成方块。
+- 瞄准镜画面可能 sideways/横着或错位。
+- 物理 Elcan 模型、镜片、白色玻璃方块会显示在 overlay 里面。
+- 镜片周围出现矩形亮框，而不是干净圆形镜片。
+- 早期尝试会出现黑圈、缓存错误画面、双重瞄准镜画面。
+
+根本原因：
+TRM 原本没有 ARC9 那种 RT 瞄准镜管线。ARC9 有完整的 Render Target、模型子材质、角度修正、准星绘制、viewmodel 渲染时机系统。TRM 的配件系统更简单，所以强行把 INS2/TFA scope 塞进去会导致模型、材质、渲染顺序冲突。
+
+
+2. 第一个大改动：添加 Render Target 瞄准镜视角
+----------------------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+RenderScopeView(att, wep)
+
+添加了什么：
+添加了 RT 摄像机。瞄准镜现在会把独立的放大玩家视角渲染到一个贴图里。
+
+替换了什么：
+替换了只依赖普通 ADS 缩放或物理瞄准镜镜片的方式。现在镜片有自己的渲染画面。
+
+工作方式：
+- GetScopeRT 创建正方形 Render Target。
+- RenderScopeView 从 owner:EyePos() 和 owner:EyeAngles() 渲染。
+- render.PushRenderTarget(rt) 开始渲染到 scope texture。
+- render.RenderView 把放大的世界画面画进去。
+- render.PopRenderTarget() 返回正常渲染。
+
+重要最终逻辑：
+- RT 大小由 Scope.RTSize 控制。
+- 当前 Elcan 使用 RTSize = 1024。
+- RT 视口强制正方形：
+  x = 0
+  y = 0
+  w = rtSize
+  h = rtSize
+  aspect = 1
+
+为什么重要：
+如果不强制正方形视口，RT 可能根据玩家分辨率拉伸、裁切或显示异常。
+
+
+3. 第二个改动：把方形 RT 裁成圆形
+---------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+DrawTexturedCircle(x, y, radius, segments, textureRotate)
+
+添加了什么：
+添加了基于多边形的圆形贴图绘制函数。
+
+替换了什么：
+替换了用 surface.DrawTexturedRect 或 DrawTexturedRectRotated 绘制 scope RT 的方式。
+
+为什么需要：
+Render Target 本质是方形贴图。如果正常绘制，玩家会看到方形 scope 图像。之前截图里的圆形线条后面带大矩形就是这个问题。
+
+工作方式：
+函数围绕中心点生成一圈顶点，每个顶点有 UV 坐标，把方形贴图映射成圆形。
+
+如何调：
+- segments 越高圆越平滑。
+- segments 越低性能更好。
+- textureRotate 可以在必要时旋转 RT 图像，但当前 Elcan 使用 TextureRotate = 0。
+
+
+4. 第三个改动：添加备用准星线
+-----------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+DrawReticle2D(att, scope, x, y, radius, alpha)
+
+添加了什么：
+使用 surface.DrawRect 手动画准星。
+
+替换了什么：
+替换了只依赖 INS2/TFA Elcan 准星材质。
+
+为什么需要：
+INS2/TFA 准星材质在这个 TRM 渲染路径里不稳定。它可能消失、显示成方块、或者在亮背景上看不清。
+
+当前准星：
+- 细中心十字。
+- 较粗左右横线。
+- 较粗下方竖线。
+- ReticleLineColor 控制颜色。
+
+如何调：
+在 DrawReticle2D 里：
+- gap 控制中心空隙。
+- fineLen 控制细线长度。
+- postStart 控制粗线离中心距离。
+- postLen 控制粗线长度。
+- thick 控制细线粗细。
+- postThick 控制粗线粗细。
+
+
+5. 第四个改动：材质准星改成可选
+-------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+行为：
+只有下面条件成立才绘制材质准星：
+UseMaterialReticle = true
+
+当前 Elcan：
+UseMaterialReticle = false
+
+替换了什么：
+早期版本会自动绘制 INS2/TFA 材质准星。
+
+为什么改：
+材质准星会显示成方形贴图。禁用它可以阻止方块准星 artifact。
+
+以后怎么改：
+如果有真正干净透明的准星材质，可以在 Scope 表里设置 UseMaterialReticle = true。
+
+
+6. 第五个改动：测试 3D 镜片渲染，然后在 Elcan 上禁用
+----------------------------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+DrawScope3D(att, wep, scopeAtt)
+
+尝试了什么：
+用 render.DrawQuadEasy 把 RT 画到物理瞄准镜模型镜片上。
+
+出了什么问题：
+TRM 的模型绘制顺序不是为这个设计的。3D 镜片和 HUD overlay 会叠在一起，产生：
+- 双重 scope 画面
+- 黑圈
+- 白方块
+- 物理模型/镜片显示在 overlay 里
+
+当前 Elcan：
+Use3D = false
+UseMaterialReticle3D = false
+
+为什么保留在 base：
+以后其他瞄准镜可能能用，但当前 Elcan 走更稳定的 HUD/PIP overlay。
+
+
+7. 第六个改动：实验 PreRender hook，然后删除
+--------------------------------------------
+
+删除文件：
+lua/autorun/client/cl_trm_scope_rt.lua
+
+它是什么：
+一个模仿 ARC9 的实验 PreRender hook，用来更早更新 RT。
+
+为什么尝试：
+ARC9 会在特定 render hook 里渲染 scope，而不是只在配件绘制里渲染。我尝试模仿这个时机。
+
+为什么删除：
+在 TRM 里，这个 hook 会在武器/配件状态还没准备好时捕捉坏画面，导致黑圈、缓存垃圾、错误物体出现在 scope RT 里。
+
+最终决定：
+这个 patch 不使用 PreRender hook。当前稳定版本只从 optic 渲染路径更新 RT。
+
+
+8. 第七个改动：移除噪点 overlay
+-------------------------------
+
+移除行为：
+从 att_optic.lua 移除了旧的 scopeNoise 材质 pass。
+
+它用的材质：
+Material("models/weapons/tfa_ins2/optics/laser_noise")
+
+为什么移除：
+它可能显示成方形脏贴图，让调试更困难。
+
+以后怎么加镜片污渍：
+用真正透明的圆形 lens dirt 贴图或 shader，不要用随机方形噪点材质。
+
+
+9. 第八个改动：开镜时隐藏物理瞄准镜模型
+---------------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+ATTACHMENT:RenderScope(wep, model)
+
+当前 Elcan：
+HideModelInScope = true
+
+替换了什么：
+以前代码总是在画 scope overlay 前调用 model:DrawModel()。
+
+为什么不好：
+Elcan 本体、玻璃、白色镜片材质会出现在 scope 图像里。截图中看到 optic body 在 overlay 里面就是这个问题。
+
+现在怎么做：
+如果玩家正在开镜并且 HideModelInScope 为 true，则 HUD scope overlay 开启时跳过物理 optic model。
+
+如何调：
+- HideModelInScope = true 开镜隐藏模型。
+- HideModelInScope = false 开镜显示模型。
+
+
+10. 第九个改动：overlay 改成屏幕居中
+------------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+当前 Elcan：
+CenterOverlay = true
+
+替换了什么：
+原本 overlay 使用 scopeAtt.Pos:ToScreen()，也就是跟随模型 attachment 点。
+
+为什么不好：
+overlay 会漂移，或者和玩家真实瞄准不对齐。
+
+现在怎么做：
+如果 CenterOverlay 为 true，镜片绘制在 ScrW() * 0.5 和 ScrH() * 0.5。
+
+如何调：
+- CenterOverlay = true 固定居中。
+- CenterOverlay = false 跟随模型 attachment。
+- ScreenOffset 可以微调位置。
+
+
+11. 第十个改动：修复镜片周围的大亮方块
+-------------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+DrawScopeOverlay(att, wep, screen)
+
+之前为什么出错：
+代码只把圆形 bounding square 外面变暗。因为圆形在一个方形框内，所以四个角仍然是亮的，看起来像一个巨大矩形。
+
+最终修复：
+当前代码先把整个屏幕变暗：
+surface.DrawRect(0, 0, ScrW(), ScrH())
+
+然后绘制：
+1. 黑色填充 scope housing 圆
+2. 圆形 RT 镜片
+3. 准星线
+4. scope rim/highlight 圈
+
+结果：
+只有圆形 PIP 镜片应该是亮的，方块应该消失。
+
+
+12. 第十一个改动：添加可见 scope 外框/镜体
+------------------------------------------
+
+位置：
+lua/trmbase/attachments/base/att_optic.lua
+
+主要函数：
+DrawScopeEdge(x, y, radius, alpha)
+
+添加了什么：
+现在 overlay 会画黑色外框线和轻微内部高光。
+
+为什么：
+scope 应该有真实 optic 的外轮廓。没有 rim 时它看起来像普通 HUD 圆形裁切。
+
+如何调：
+- 增加 DrawScopeOverlay 里的 radius + 34 或 radius + 17 可以让镜体更厚。
+- 增加 DrawScopeEdge 里的循环范围可以让外框更厚。
+- 降低 alpha 让 rim 更柔。
+
+
+13. 第十二个改动：重新调 Elcan 放大倍率
+---------------------------------------
+
+位置：
+lua/trmbase/attachments/reticles/att_ins_elcan.lua
+
+当前值：
+Magnification = 4
+FOV = 18
+Aim.Scale = 1.15
+
+替换了什么：
+早期测试值要么放大太弱，要么普通 ADS 摄像机缩放太强。
+
+为什么：
+PIP scope 应该主要靠 RT 镜片放大，不应该把整个玩家屏幕强行放大。
+
+如何调：
+- 降低 FOV = 更强放大。
+- 提高 FOV = 更弱放大。
+- PIP scope 保持 Aim.Scale 较低。
+
+例子：
+FOV = 14 更强放大。
+FOV = 24 更弱放大。
+Aim.Scale = 1.15 基本保持玩家视角正常。
+Aim.Scale = 1.45 会让整个玩家相机也更放大。
+
+
+14. 当前 Elcan 最终设置
+----------------------
+
+位置：
+lua/trmbase/attachments/reticles/att_ins_elcan.lua
+
+当前 Scope 表：
+Magnification = 4
+FOV = 18
+RTSize = 1024
+ScreenScale = 0.62
+CenterOverlay = true
+HideModelInScope = true
+ReticleSize = 230
+ReticleLineColor = Color(0, 0, 0, 245)
+Parallax = 0.08
+ParallaxMax = 0.12
+BackdropAlpha = 245
+ScreenOverlay = true
+Use3D = false
+UseMaterialReticle = false
+UseMaterialReticle3D = false
+TextureRotate = 0
+DrawAt = 0.35
+ZNear = 4
+
+重要参数说明：
+- Magnification：目标倍率/逻辑倍率。
+- FOV：真正影响 RT 放大的值，越低越放大。
+- RTSize：scope texture 分辨率。
+- ScreenScale：屏幕上 PIP 镜片大小。
+- CenterOverlay：镜片居中。
+- HideModelInScope：开镜时隐藏物理 optic model。
+- ReticleLineColor：备用准星颜色。
+- BackdropAlpha：镜片外黑暗程度。
+- Use3D：当前 Elcan 禁用不稳定的 3D model lens 路径。
+- UseMaterialReticle：禁用坏掉的方形材质准星。
+- TextureRotate：保持 0，除非 RT 画面确实需要旋转。
+
+
+15. 后续如果继续改进
+--------------------
+
+这个 patch 是 TRM 兼容的 HUD/PIP scope，不是完整 ARC9 克隆。
+
+继续提升可以做：
+- 做真正的 model-submaterial RT 系统。
+- 把 RT 材质直接应用到 optic lens 材质。
+- 添加真正 lens shader/distortion。
+- 添加真实 eye relief/parallax mask。
+- 添加透明 lens dirt 贴图，而不是方形 noise。
+- 只有在重新设计 TRM draw order 后，再把 scope RT 渲染移动到干净的 render hook。
+
+为什么这是更大的工程：
+ARC9 有完整的 RT scope 武器底座架构。TRM 没有。真正 ARC9 级别的 scope 需要重写更多 weapon/render pipeline，不只是改一个 attachment 文件。
