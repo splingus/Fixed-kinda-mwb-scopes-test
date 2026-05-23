@@ -1,0 +1,22 @@
+# Local/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archives/build output
+*.zip
+*.rar
+*.7z
+
+# OS junk
+Thumbs.db
+Desktop.ini
+
+# GMod generated/cache-ish files
+*.cache
+*.tmp
+
+# Source model compiler intermediates
+*.smd
+*.qc

@@ -1,0 +1,13 @@
+{
+    "title": "TRM Weapon Base Scope Fix",
+    "type": "weapon",
+    "tags": [
+        "realism",
+        "fun"
+    ],
+    "ignore": [
+        ".vscode",
+        "*.zip",
+        "*.sw.vtx"
+    ]
+}
